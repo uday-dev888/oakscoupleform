@@ -4,23 +4,76 @@
  */
 
 import { useState, useEffect, useRef, useCallback } from "react";
+import { GoogleGenAI, LiveServerMessage } from "@google/genai";
 import { SpeechLanguageCode } from "../constants.ts";
 import { cleanSentenceText, deduplicateTranscript } from "../utils/textCleaner.ts";
 
-// Global tracker to ensure only one microphone is listening at any time
+// Global tracker to ensure only one microphone is active at any time
 let activeSessionStopper: (() => void) | null = null;
-
-// Augment window for Web Speech API
-declare global {
-  interface Window {
-    SpeechRecognition?: any;
-    webkitSpeechRecognition?: any;
-  }
-}
 
 export interface UseSpeechRecognitionOptions {
   onCommit: (text: string) => void;
   language: SpeechLanguageCode;
+}
+
+// Inline fallback for the AudioWorklet processor in case file fetch fails
+const WORKLET_PROCESSOR_CODE = `
+class PcmProcessor extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.targetSampleRate = 16000;
+    this.chunkSize = 1600; // 100ms at 16kHz
+    this.buffer = new Int16Array(this.chunkSize);
+    this.bufferIndex = 0;
+    this.sourceOffset = 0;
+  }
+
+  process(inputs) {
+    const input = inputs[0];
+    if (!input || !input[0] || input[0].length === 0) return true;
+    const channelData = input[0];
+    const inRate = sampleRate;
+    const outRate = this.targetSampleRate;
+    const ratio = inRate / outRate;
+
+    let inIndex = this.sourceOffset;
+    while (inIndex < channelData.length) {
+      const idx0 = Math.floor(inIndex);
+      const idx1 = Math.min(idx0 + 1, channelData.length - 1);
+      const frac = inIndex - idx0;
+      const s0 = channelData[idx0];
+      const s1 = channelData[idx1];
+      const sample = s0 + frac * (s1 - s0);
+
+      const clamped = Math.max(-1, Math.min(1, sample));
+      const int16 = clamped < 0 ? Math.round(clamped * 0x8000) : Math.round(clamped * 0x7FFF);
+
+      this.buffer[this.bufferIndex++] = int16;
+
+      if (this.bufferIndex >= this.chunkSize) {
+        const chunkToSend = new Int16Array(this.buffer);
+        this.port.postMessage(chunkToSend.buffer, [chunkToSend.buffer]);
+        this.bufferIndex = 0;
+      }
+
+      inIndex += ratio;
+    }
+
+    this.sourceOffset = inIndex - channelData.length;
+    return true;
+  }
+}
+registerProcessor("pcm-processor", PcmProcessor);
+`;
+
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  const len = bytes.byteLength;
+  for (let i = 0; i < len; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
 }
 
 export function useSpeechRecognition({
@@ -32,51 +85,23 @@ export function useSpeechRecognition({
   const [interimText, setInterimText] = useState<string>("");
   const [friendlyError, setFriendlyError] = useState<string | null>(null);
 
-  const recognitionRef = useRef<any>(null);
-  const isExplicitlyStoppedRef = useRef<boolean>(true);
-  const committedBaseRef = useRef<string>(""); // snapshot of text before recording started
-  const currentDictationRef = useRef<string>(""); // words accumulated during this session
-  const restartTimerRef = useRef<any>(null);
-  const lastProcessedIndexRef = useRef<number>(-1);
+  // References for live session management
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const workletNodeRef = useRef<AudioWorkletNode | null>(null);
+  const liveSessionRef = useRef<any>(null);
 
-  // Check browser support on mount
+  const isExplicitlyStoppedRef = useRef<boolean>(true);
+  const committedBaseRef = useRef<string>("");
+  const currentDictationRef = useRef<string>("");
+
+  // Check support on mount
   useEffect(() => {
-    const SpeechClass =
-      window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechClass) {
+    const hasMedia = typeof navigator !== "undefined" && !!navigator.mediaDevices?.getUserMedia;
+    const hasAudioCtx = typeof window !== "undefined" && (!!window.AudioContext || !!(window as any).webkitAudioContext);
+    if (!hasMedia || !hasAudioCtx) {
       setIsSupported(false);
     }
-  }, []);
-
-  // Handle tab visibility change (screen lock or background)
-  useEffect(() => {
-    const handleVisibilityChange = () => {
-      if (document.hidden && isListening) {
-        stopSession(true, "Tap the mic to continue");
-      }
-    };
-
-    document.addEventListener("visibilitychange", handleVisibilityChange);
-    return () => {
-      document.removeEventListener("visibilitychange", handleVisibilityChange);
-    };
-  }, [isListening]);
-
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => {
-      if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
-      if (recognitionRef.current) {
-        try {
-          recognitionRef.current.abort();
-        } catch {
-          // ignore
-        }
-      }
-      if (activeSessionStopper === stopSessionInternal) {
-        activeSessionStopper = null;
-      }
-    };
   }, []);
 
   const triggerHaptic = useCallback((pattern = 40) => {
@@ -92,21 +117,45 @@ export function useSpeechRecognition({
   const stopSessionInternal = useCallback(
     (keepCaptured: boolean, statusNotice?: string) => {
       isExplicitlyStoppedRef.current = true;
-      if (restartTimerRef.current) {
-        clearTimeout(restartTimerRef.current);
-        restartTimerRef.current = null;
+
+      // 1. Disconnect and stop AudioWorklet & AudioContext
+      if (workletNodeRef.current) {
+        try {
+          workletNodeRef.current.port.onmessage = null;
+          workletNodeRef.current.disconnect();
+        } catch {
+          // ignore
+        }
+        workletNodeRef.current = null;
       }
 
-      if (recognitionRef.current) {
+      if (audioContextRef.current) {
         try {
-          recognitionRef.current.stop();
+          audioContextRef.current.close();
         } catch {
-          try {
-            recognitionRef.current.abort();
-          } catch {
-            // ignore
-          }
+          // ignore
         }
+        audioContextRef.current = null;
+      }
+
+      // 2. Stop single continuous MediaStream tracks
+      if (mediaStreamRef.current) {
+        try {
+          mediaStreamRef.current.getTracks().forEach((track) => track.stop());
+        } catch {
+          // ignore
+        }
+        mediaStreamRef.current = null;
+      }
+
+      // 3. Close Gemini Live session
+      if (liveSessionRef.current) {
+        try {
+          liveSessionRef.current.close();
+        } catch {
+          // ignore
+        }
+        liveSessionRef.current = null;
       }
 
       setIsListening(false);
@@ -118,7 +167,6 @@ export function useSpeechRecognition({
       }
 
       if (keepCaptured) {
-        // Keep whatever was spoken in this session
         const combined = currentDictationRef.current
           ? committedBaseRef.current
             ? `${committedBaseRef.current.trim()} ${currentDictationRef.current.trim()}`
@@ -127,7 +175,6 @@ export function useSpeechRecognition({
         const cleaned = cleanSentenceText(combined);
         onCommit(cleaned);
       } else {
-        // Discard dictation, restore what was there before
         onCommit(committedBaseRef.current);
       }
 
@@ -145,13 +192,32 @@ export function useSpeechRecognition({
     [stopSessionInternal]
   );
 
+  // Tab visibility change (screen lock or background)
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.hidden && isListening) {
+        stopSession(true, "Tap the mic to continue speaking");
+      }
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [isListening, stopSession]);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      stopSessionInternal(true);
+    };
+  }, [stopSessionInternal]);
+
   const startListening = useCallback(
-    (initialValue: string) => {
-      const SpeechClass =
-        window.SpeechRecognition || window.webkitSpeechRecognition;
-      if (!SpeechClass) {
-        setIsSupported(false);
-        return;
+    async (initialValue: string) => {
+      // 1. Immediately blur any active input/textarea to dismiss Android keyboard
+      if (typeof document !== "undefined" && document.activeElement instanceof HTMLElement) {
+        document.activeElement.blur();
       }
 
       // Stop any other active mic session in the app
@@ -164,107 +230,165 @@ export function useSpeechRecognition({
       setInterimText("");
       committedBaseRef.current = initialValue || "";
       currentDictationRef.current = "";
-      lastProcessedIndexRef.current = -1;
       isExplicitlyStoppedRef.current = false;
-
       triggerHaptic(40);
 
-      const createAndStartRecognition = () => {
-        try {
-          const recognition = new SpeechClass();
-          recognition.continuous = true;
-          recognition.interimResults = true;
-          recognition.lang = language;
-          recognition.maxAlternatives = 1;
+      try {
+        // 2. Request mic stream ONCE with recommended constraints
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            channelCount: 1,
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+        });
 
-          recognition.onstart = () => {
-            setIsListening(true);
-            setFriendlyError(null);
-          };
-
-          recognition.onresult = (event: any) => {
-            let sessionFinalTranscript = "";
-            let currentInterim = "";
-
-            for (let i = 0; i < event.results.length; i++) {
-              const res = event.results[i];
-              const transcript = res[0]?.transcript || "";
-              if (res.isFinal) {
-                if (i > lastProcessedIndexRef.current) {
-                  lastProcessedIndexRef.current = i;
-                  sessionFinalTranscript = deduplicateTranscript(
-                    sessionFinalTranscript,
-                    transcript
-                  );
-                }
-              } else {
-                currentInterim += transcript;
-              }
-            }
-
-            if (sessionFinalTranscript) {
-              currentDictationRef.current = deduplicateTranscript(
-                currentDictationRef.current,
-                sessionFinalTranscript
-              );
-              const combinedSoFar = committedBaseRef.current
-                ? `${committedBaseRef.current.trim()} ${currentDictationRef.current.trim()}`
-                : currentDictationRef.current.trim();
-              onCommit(cleanSentenceText(combinedSoFar));
-            }
-
-            setInterimText(currentInterim.trim());
-          };
-
-          recognition.onerror = (event: any) => {
-            const error = event.error;
-            if (error === "no-speech" || error === "aborted") {
-              // Silently ignore thinking pauses and normal restarts
-              return;
-            }
-
-            if (error === "not-allowed" || error === "service-not-allowed") {
-              isExplicitlyStoppedRef.current = true;
-              setIsListening(false);
-              setFriendlyError(
-                "We can't hear you yet. Please allow the microphone in your browser, or just type instead."
-              );
-              return;
-            }
-
-            if (error === "network") {
-              setFriendlyError(
-                "Connection dropped, your words so far are saved. Tap the mic to continue."
-              );
-              return;
-            }
-
-            // General gentle fallback
-            setFriendlyError("Tap the mic to continue speaking.");
-          };
-
-          recognition.onend = () => {
-            // Browsers often time out recognition after a few seconds of silence.
-            // If the user did not click Done or Cancel, automatically restart after 150ms!
-            if (!isExplicitlyStoppedRef.current) {
-              restartTimerRef.current = setTimeout(() => {
-                if (!isExplicitlyStoppedRef.current) {
-                  createAndStartRecognition();
-                }
-              }, 150);
-            } else {
-              setIsListening(false);
-            }
-          };
-
-          recognitionRef.current = recognition;
-          recognition.start();
-        } catch {
-          setIsListening(false);
+        // If stopped while prompting permission
+        if (isExplicitlyStoppedRef.current) {
+          stream.getTracks().forEach((t) => t.stop());
+          return;
         }
-      };
 
-      createAndStartRecognition();
+        mediaStreamRef.current = stream;
+
+        // 3. Fetch ephemeral token from serverless endpoint /api/live-token
+        let ephemeralToken: string | null = null;
+        try {
+          const res = await fetch("/api/live-token");
+          if (!res.ok) {
+            const errJson = await res.json().catch(() => ({}));
+            throw new Error(errJson.error || `HTTP ${res.status}`);
+          }
+          const json = await res.json();
+          ephemeralToken = json.token;
+        } catch (tokenErr: any) {
+          console.error("Token fetch failed:", tokenErr);
+          throw new Error("Unable to connect to live transcription service.");
+        }
+
+        if (!ephemeralToken) {
+          throw new Error("No live token received.");
+        }
+
+        // 4. Initialize Web Audio Context & AudioWorklet
+        const AudioCtxClass = window.AudioContext || (window as any).webkitAudioContext;
+        const audioCtx = new AudioCtxClass();
+        audioContextRef.current = audioCtx;
+
+        // Ensure audio context is running (needed on mobile after user gesture)
+        if (audioCtx.state === "suspended") {
+          await audioCtx.resume();
+        }
+
+        try {
+          await audioCtx.audioWorklet.addModule("/pcm-processor.js");
+        } catch (loadErr) {
+          // Fallback to inline blob URL if needed
+          const blob = new Blob([WORKLET_PROCESSOR_CODE], { type: "application/javascript" });
+          const blobUrl = URL.createObjectURL(blob);
+          await audioCtx.audioWorklet.addModule(blobUrl);
+          URL.revokeObjectURL(blobUrl);
+        }
+
+        const source = audioCtx.createMediaStreamSource(stream);
+        const workletNode = new AudioWorkletNode(audioCtx, "pcm-processor");
+        workletNodeRef.current = workletNode;
+
+        source.connect(workletNode);
+
+        // 5. Connect to Gemini Live API with ephemeral token
+        const clientAi = new GoogleGenAI({
+          apiKey: ephemeralToken,
+          httpOptions: { apiVersion: "v1alpha" },
+        });
+
+        const langPrompt = language
+          ? `The speaker is speaking in language code ${language}. `
+          : "";
+
+        const session = await clientAi.live.connect({
+          model: "gemini-3.5-transcribe-live",
+          config: {
+            inputAudioTranscription: {},
+            systemInstruction: `You are a silent, verbatim transcriber. Never reply or speak. ${langPrompt}Transcribe exactly what the speaker says, in the language they speak.`,
+          },
+          callbacks: {
+            onmessage: (message: LiveServerMessage) => {
+              const sc = message.serverContent;
+              if (!sc) return;
+
+              // Interim in-progress transcription
+              if (sc.interimInputTranscription?.text) {
+                setInterimText(sc.interimInputTranscription.text);
+              }
+
+              // Finalized input transcription segment
+              if (sc.inputTranscription?.text) {
+                const chunk = sc.inputTranscription.text;
+                currentDictationRef.current = deduplicateTranscript(
+                  currentDictationRef.current,
+                  chunk
+                );
+                const combined = committedBaseRef.current
+                  ? `${committedBaseRef.current.trim()} ${currentDictationRef.current.trim()}`
+                  : currentDictationRef.current.trim();
+                onCommit(cleanSentenceText(combined));
+                setInterimText("");
+              }
+            },
+            onerror: (err: any) => {
+              console.error("Live session error:", err);
+              if (!isExplicitlyStoppedRef.current) {
+                setFriendlyError("Live connection dropped. Tap mic to resume.");
+              }
+            },
+            onclose: () => {
+              if (!isExplicitlyStoppedRef.current) {
+                setIsListening(false);
+              }
+            },
+          },
+        });
+
+        liveSessionRef.current = session;
+        setIsListening(true);
+        setFriendlyError(null);
+
+        // 6. Stream ~100ms 16kHz mono 16-bit PCM chunks in real time
+        workletNode.port.onmessage = (event: MessageEvent<ArrayBuffer>) => {
+          if (isExplicitlyStoppedRef.current || !liveSessionRef.current) return;
+          try {
+            const base64Audio = arrayBufferToBase64(event.data);
+            liveSessionRef.current.sendRealtimeInput({
+              audio: {
+                data: base64Audio,
+                mimeType: "audio/pcm;rate=16000",
+              },
+            });
+          } catch (sendErr) {
+            console.error("Error sending realtime audio chunk:", sendErr);
+          }
+        };
+      } catch (err: any) {
+        console.error("Failed to start voice listening:", err);
+        stopSessionInternal(true);
+
+        const errorMsg = err?.message || "";
+        if (
+          err?.name === "NotAllowedError" ||
+          err?.name === "PermissionDeniedError" ||
+          errorMsg.includes("denied")
+        ) {
+          setFriendlyError(
+            "We can't hear you yet. Please allow microphone access in your browser, or type instead."
+          );
+        } else {
+          setFriendlyError(
+            "Microphone or live connection unavailable. Tap to retry, or type your answer."
+          );
+        }
+      }
     },
     [language, onCommit, stopSessionInternal, triggerHaptic]
   );
