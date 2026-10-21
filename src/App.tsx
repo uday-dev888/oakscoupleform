@@ -58,6 +58,80 @@ const INITIAL_ANSWERS: QuestionnaireAnswers = {
   q23_oneLastThing: { notes: "", images: [] },
 };
 
+function sanitizeAnswers(raw: any): QuestionnaireAnswers {
+  if (!raw || typeof raw !== "object") return { ...INITIAL_ANSWERS };
+  return {
+    partner1: typeof raw.partner1 === "string" ? raw.partner1 : "",
+    partner2: typeof raw.partner2 === "string" ? raw.partner2 : "",
+    q1_calls: {
+      aCallsB: typeof raw.q1_calls === "object" && raw.q1_calls ? (raw.q1_calls.aCallsB ?? "") : "",
+      bCallsA: typeof raw.q1_calls === "object" && raw.q1_calls ? (raw.q1_calls.bCallsA ?? "") : "",
+    },
+    q2_workPassion: {
+      partnerA: typeof raw.q2_workPassion === "object" && raw.q2_workPassion ? (raw.q2_workPassion.partnerA ?? "") : (typeof raw.q2_workPassion === "string" ? raw.q2_workPassion : ""),
+      partnerB: typeof raw.q2_workPassion === "object" && raw.q2_workPassion ? (raw.q2_workPassion.partnerB ?? "") : "",
+    },
+    q3_firstMeet: typeof raw.q3_firstMeet === "string" ? raw.q3_firstMeet : "",
+    q4_firstImpression: {
+      partnerA: typeof raw.q4_firstImpression === "object" && raw.q4_firstImpression ? (raw.q4_firstImpression.partnerA ?? "") : (typeof raw.q4_firstImpression === "string" ? raw.q4_firstImpression : ""),
+      partnerB: typeof raw.q4_firstImpression === "object" && raw.q4_firstImpression ? (raw.q4_firstImpression.partnerB ?? "") : "",
+    },
+    q5_threeWords: Array.isArray(raw.q5_threeWords) && raw.q5_threeWords.length === 3
+      ? [raw.q5_threeWords[0] ?? "", raw.q5_threeWords[1] ?? "", raw.q5_threeWords[2] ?? ""]
+      : ["", "", ""],
+    q6_activities: {
+      selected: Array.isArray(raw.q6_activities?.selected) ? raw.q6_activities.selected : [],
+      other: typeof raw.q6_activities?.other === "string" ? raw.q6_activities.other : "",
+    },
+    q7_loveMost: {
+      partnerA: typeof raw.q7_loveMost === "object" && raw.q7_loveMost ? (raw.q7_loveMost.partnerA ?? "") : (typeof raw.q7_loveMost === "string" ? raw.q7_loveMost : ""),
+      partnerB: typeof raw.q7_loveMost === "object" && raw.q7_loveMost ? (raw.q7_loveMost.partnerB ?? "") : "",
+    },
+    q8_funnyStory: typeof raw.q8_funnyStory === "string" ? raw.q8_funnyStory : "",
+    q9_proposal: {
+      choice: raw.q9_proposal?.choice ?? "",
+      story: raw.q9_proposal?.story ?? "",
+    },
+    q10_people: {
+      familyMembers: Array.isArray(raw.q10_people?.familyMembers) ? raw.q10_people.familyMembers : [],
+      treePhotoUrl: raw.q10_people?.treePhotoUrl,
+      treeNotes: typeof raw.q10_people?.treeNotes === "string" ? raw.q10_people.treeNotes : "",
+    },
+    q11_filmFeel: typeof raw.q11_filmFeel === "string" ? raw.q11_filmFeel : "",
+    q12_references: {
+      links: Array.isArray(raw.q12_references?.links) ? raw.q12_references.links : [],
+      images: Array.isArray(raw.q12_references?.images) ? raw.q12_references.images : [],
+      notes: typeof raw.q12_references?.notes === "string" ? raw.q12_references.notes : "",
+    },
+    q13_tone: typeof raw.q13_tone === "string" ? raw.q13_tone : "",
+    q14_moments: {
+      selected: Array.isArray(raw.q14_moments?.selected) ? raw.q14_moments.selected : [],
+      other: typeof raw.q14_moments?.other === "string" ? raw.q14_moments.other : "",
+    },
+    q15_captureAvoid: {
+      definitelyCapture: typeof raw.q15_captureAvoid === "object" && raw.q15_captureAvoid ? (raw.q15_captureAvoid.definitelyCapture ?? "") : "",
+      pleaseAvoid: typeof raw.q15_captureAvoid === "object" && raw.q15_captureAvoid ? (raw.q15_captureAvoid.pleaseAvoid ?? "") : "",
+    },
+    q16_nonNegotiables: typeof raw.q16_nonNegotiables === "string" ? raw.q16_nonNegotiables : "",
+    q17_emotional: typeof raw.q17_emotional === "string" ? raw.q17_emotional : "",
+    q18_cameraVersatility: typeof raw.q18_cameraVersatility === "string" ? raw.q18_cameraVersatility : "",
+    q19_whatMattersMost: {
+      selected: Array.isArray(raw.q19_whatMattersMost?.selected) ? raw.q19_whatMattersMost.selected : [],
+      other: typeof raw.q19_whatMattersMost?.other === "string" ? raw.q19_whatMattersMost.other : "",
+    },
+    q20_guidanceComfort: typeof raw.q20_guidanceComfort === "string" ? raw.q20_guidanceComfort : "",
+    q21_comfortTips: {
+      selected: Array.isArray(raw.q21_comfortTips?.selected) ? raw.q21_comfortTips.selected : [],
+      notes: typeof raw.q21_comfortTips?.notes === "string" ? raw.q21_comfortTips.notes : "",
+    },
+    q22_futureFeeling: typeof raw.q22_futureFeeling === "string" ? raw.q22_futureFeeling : "",
+    q23_oneLastThing: {
+      notes: typeof raw.q23_oneLastThing?.notes === "string" ? raw.q23_oneLastThing.notes : "",
+      images: Array.isArray(raw.q23_oneLastThing?.images) ? raw.q23_oneLastThing.images : [],
+    },
+  };
+}
+
 // Chapters definition
 const CHAPTERS = [
   {
@@ -134,7 +208,7 @@ export default function App() {
       if (stored) {
         const parsed = JSON.parse(stored);
         if (parsed.answers) {
-          setAnswers(parsed.answers);
+          setAnswers(sanitizeAnswers(parsed.answers));
         }
         if (typeof parsed.step === "number" && parsed.step > 0) {
           setSavedStepNotice(parsed.step);
@@ -373,36 +447,50 @@ export default function App() {
               />
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div className="space-y-2">
-                  <label className="block text-base font-medium text-[#1A1A1A]">
+                  <label htmlFor="q1-calls-a2b" className="block text-base font-medium text-[#1A1A1A] cursor-pointer">
                     {p1} calls {p2}
                   </label>
                   <input
+                    id="q1-calls-a2b"
+                    name="q1-calls-a2b"
                     type="text"
-                    value={answers.q1_calls.aCallsB}
-                    onChange={(e) =>
+                    value={answers.q1_calls?.aCallsB ?? ""}
+                    onChange={(e) => {
+                      const val = e.target.value;
                       setAnswers((prev) => ({
                         ...prev,
-                        q1_calls: { ...prev.q1_calls, aCallsB: e.target.value },
-                      }))
-                    }
+                        q1_calls: {
+                          aCallsB: val,
+                          bCallsA: prev.q1_calls?.bCallsA ?? "",
+                        },
+                      }));
+                    }}
                     placeholder="e.g. Honey, Meeru"
+                    autoComplete="off"
                     className="w-full px-5 py-4 text-[18px] bg-white border border-[#E8E8E8] rounded-2xl focus:outline-hidden focus:border-[#1A1A1A] min-h-[58px]"
                   />
                 </div>
                 <div className="space-y-2">
-                  <label className="block text-base font-medium text-[#1A1A1A]">
+                  <label htmlFor="q1-calls-b2a" className="block text-base font-medium text-[#1A1A1A] cursor-pointer">
                     {p2} calls {p1}
                   </label>
                   <input
+                    id="q1-calls-b2a"
+                    name="q1-calls-b2a"
                     type="text"
-                    value={answers.q1_calls.bCallsA}
-                    onChange={(e) =>
+                    value={answers.q1_calls?.bCallsA ?? ""}
+                    onChange={(e) => {
+                      const val = e.target.value;
                       setAnswers((prev) => ({
                         ...prev,
-                        q1_calls: { ...prev.q1_calls, bCallsA: e.target.value },
-                      }))
-                    }
+                        q1_calls: {
+                          aCallsB: prev.q1_calls?.aCallsB ?? "",
+                          bCallsA: val,
+                        },
+                      }));
+                    }}
                     placeholder="e.g. Captain, Aaru"
+                    autoComplete="off"
                     className="w-full px-5 py-4 text-[18px] bg-white border border-[#E8E8E8] rounded-2xl focus:outline-hidden focus:border-[#1A1A1A] min-h-[58px]"
                   />
                 </div>
@@ -419,14 +507,15 @@ export default function App() {
               />
               <div className="space-y-6">
                 <VoiceTextarea
+                  id="q2-work-partner1"
                   label={`${p1}'s work & passions`}
-                  value={answers.q2_workPassion.partnerA}
+                  value={answers.q2_workPassion?.partnerA ?? ""}
                   onChange={(val) =>
                     setAnswers((prev) => ({
                       ...prev,
                       q2_workPassion: {
-                        ...prev.q2_workPassion,
                         partnerA: val,
+                        partnerB: prev.q2_workPassion?.partnerB ?? "",
                       },
                     }))
                   }
@@ -434,13 +523,14 @@ export default function App() {
                   rows={3}
                 />
                 <VoiceTextarea
+                  id="q2-work-partner2"
                   label={`${p2}'s work & passions`}
-                  value={answers.q2_workPassion.partnerB}
+                  value={answers.q2_workPassion?.partnerB ?? ""}
                   onChange={(val) =>
                     setAnswers((prev) => ({
                       ...prev,
                       q2_workPassion: {
-                        ...prev.q2_workPassion,
+                        partnerA: prev.q2_workPassion?.partnerA ?? "",
                         partnerB: val,
                       },
                     }))
@@ -460,7 +550,8 @@ export default function App() {
                 helper="Tell the unedited story — who saw whom first, where, and when."
               />
               <VoiceTextarea
-                value={answers.q3_firstMeet}
+                id="q3-first-meet"
+                value={answers.q3_firstMeet ?? ""}
                 onChange={(val) =>
                   setAnswers((prev) => ({ ...prev, q3_firstMeet: val }))
                 }
@@ -479,14 +570,15 @@ export default function App() {
               />
               <div className="space-y-6">
                 <VoiceTextarea
+                  id="q4-impression-partner1"
                   label={`${p1}'s first impression of ${p2}`}
-                  value={answers.q4_firstImpression.partnerA}
+                  value={answers.q4_firstImpression?.partnerA ?? ""}
                   onChange={(val) =>
                     setAnswers((prev) => ({
                       ...prev,
                       q4_firstImpression: {
-                        ...prev.q4_firstImpression,
                         partnerA: val,
+                        partnerB: prev.q4_firstImpression?.partnerB ?? "",
                       },
                     }))
                   }
@@ -494,13 +586,14 @@ export default function App() {
                   rows={3}
                 />
                 <VoiceTextarea
+                  id="q4-impression-partner2"
                   label={`${p2}'s first impression of ${p1}`}
-                  value={answers.q4_firstImpression.partnerB}
+                  value={answers.q4_firstImpression?.partnerB ?? ""}
                   onChange={(val) =>
                     setAnswers((prev) => ({
                       ...prev,
                       q4_firstImpression: {
-                        ...prev.q4_firstImpression,
+                        partnerA: prev.q4_firstImpression?.partnerA ?? "",
                         partnerB: val,
                       },
                     }))
@@ -600,12 +693,16 @@ export default function App() {
               </div>
               <div className="pt-2">
                 <VoiceTextarea
+                  id="q6-activities-other"
                   label="Anything else?"
-                  value={answers.q6_activities.other}
+                  value={answers.q6_activities?.other ?? ""}
                   onChange={(val) =>
                     setAnswers((prev) => ({
                       ...prev,
-                      q6_activities: { ...prev.q6_activities, other: val },
+                      q6_activities: {
+                        selected: prev.q6_activities?.selected ?? [],
+                        other: val,
+                      },
                     }))
                   }
                   placeholder="e.g. Weekend farmers markets, photography road trips, board games..."
@@ -624,24 +721,32 @@ export default function App() {
               />
               <div className="space-y-6">
                 <VoiceTextarea
+                  id="q7-love-partner1"
                   label={`What ${p1} loves most about ${p2}`}
-                  value={answers.q7_loveMost.partnerA}
+                  value={answers.q7_loveMost?.partnerA ?? ""}
                   onChange={(val) =>
                     setAnswers((prev) => ({
                       ...prev,
-                      q7_loveMost: { ...prev.q7_loveMost, partnerA: val },
+                      q7_loveMost: {
+                        partnerA: val,
+                        partnerB: prev.q7_loveMost?.partnerB ?? "",
+                      },
                     }))
                   }
                   placeholder={`What makes ${p2} truly special to you?`}
                   rows={3}
                 />
                 <VoiceTextarea
+                  id="q7-love-partner2"
                   label={`What ${p2} loves most about ${p1}`}
-                  value={answers.q7_loveMost.partnerB}
+                  value={answers.q7_loveMost?.partnerB ?? ""}
                   onChange={(val) =>
                     setAnswers((prev) => ({
                       ...prev,
-                      q7_loveMost: { ...prev.q7_loveMost, partnerB: val },
+                      q7_loveMost: {
+                        partnerA: prev.q7_loveMost?.partnerA ?? "",
+                        partnerB: val,
+                      },
                     }))
                   }
                   placeholder={`What makes ${p1} truly special to you?`}
@@ -659,7 +764,8 @@ export default function App() {
                 helper="Something that makes the two of you burst into laughter every time."
               />
               <VoiceTextarea
-                value={answers.q8_funnyStory}
+                id="q8-funny-story"
+                value={answers.q8_funnyStory ?? ""}
                 onChange={(val) =>
                   setAnswers((prev) => ({ ...prev, q8_funnyStory: val }))
                 }
@@ -706,8 +812,9 @@ export default function App() {
               {answers.q9_proposal.choice === "story" && (
                 <div className="pt-2 animate-in fade-in duration-300">
                   <VoiceTextarea
+                    id="q9-proposal-story"
                     label="The Proposal Story"
-                    value={answers.q9_proposal.story}
+                    value={answers.q9_proposal?.story ?? ""}
                     onChange={(val) =>
                       setAnswers((prev) => ({
                         ...prev,
@@ -1000,12 +1107,16 @@ export default function App() {
               </div>
               <div className="pt-2">
                 <VoiceTextarea
+                  id="q14-moments-other"
                   label="Anything else?"
-                  value={answers.q14_moments.other}
+                  value={answers.q14_moments?.other ?? ""}
                   onChange={(val) =>
                     setAnswers((prev) => ({
                       ...prev,
-                      q14_moments: { ...prev.q14_moments, other: val },
+                      q14_moments: {
+                        selected: prev.q14_moments?.selected ?? [],
+                        other: val,
+                      },
                     }))
                   }
                   placeholder="e.g. Flash mob with cousins, private vow reading before sunrise..."
@@ -1024,14 +1135,15 @@ export default function App() {
               />
               <div className="space-y-6">
                 <VoiceTextarea
+                  id="q15-capture"
                   label="Definitely capture"
-                  value={answers.q15_captureAvoid.definitelyCapture}
+                  value={answers.q15_captureAvoid?.definitelyCapture ?? ""}
                   onChange={(val) =>
                     setAnswers((prev) => ({
                       ...prev,
                       q15_captureAvoid: {
-                        ...prev.q15_captureAvoid,
                         definitelyCapture: val,
+                        pleaseAvoid: prev.q15_captureAvoid?.pleaseAvoid ?? "",
                       },
                     }))
                   }
@@ -1039,13 +1151,14 @@ export default function App() {
                   rows={3}
                 />
                 <VoiceTextarea
+                  id="q15-avoid"
                   label="Please avoid"
-                  value={answers.q15_captureAvoid.pleaseAvoid}
+                  value={answers.q15_captureAvoid?.pleaseAvoid ?? ""}
                   onChange={(val) =>
                     setAnswers((prev) => ({
                       ...prev,
                       q15_captureAvoid: {
-                        ...prev.q15_captureAvoid,
+                        definitelyCapture: prev.q15_captureAvoid?.definitelyCapture ?? "",
                         pleaseAvoid: val,
                       },
                     }))
@@ -1065,7 +1178,8 @@ export default function App() {
                 helper="Things that are absolutely sacred to you on this day."
               />
               <VoiceTextarea
-                value={answers.q16_nonNegotiables}
+                id="q16-non-negotiables"
+                value={answers.q16_nonNegotiables ?? ""}
                 onChange={(val) =>
                   setAnswers((prev) => ({ ...prev, q16_nonNegotiables: val }))
                 }
@@ -1201,13 +1315,14 @@ export default function App() {
 
               <div className="pt-2">
                 <VoiceTextarea
+                  id="q19-matters-most-other"
                   label="Other"
-                  value={answers.q19_whatMattersMost.other}
+                  value={answers.q19_whatMattersMost?.other ?? ""}
                   onChange={(val) =>
                     setAnswers((prev) => ({
                       ...prev,
                       q19_whatMattersMost: {
-                        ...prev.q19_whatMattersMost,
+                        selected: prev.q19_whatMattersMost?.selected ?? [],
                         other: val,
                       },
                     }))
@@ -1294,13 +1409,14 @@ export default function App() {
 
               <div className="pt-2">
                 <VoiceTextarea
+                  id="q21-comfort-notes"
                   label="In your own words"
-                  value={answers.q21_comfortTips.notes}
+                  value={answers.q21_comfortTips?.notes ?? ""}
                   onChange={(val) =>
                     setAnswers((prev) => ({
                       ...prev,
                       q21_comfortTips: {
-                        ...prev.q21_comfortTips,
+                        selected: prev.q21_comfortTips?.selected ?? [],
                         notes: val,
                       },
                     }))
@@ -1320,7 +1436,8 @@ export default function App() {
                 helper="Close your eyes and imagine watching it on your tenth anniversary."
               />
               <VoiceTextarea
-                value={answers.q22_futureFeeling}
+                id="q22-future-feeling"
+                value={answers.q22_futureFeeling ?? ""}
                 onChange={(val) =>
                   setAnswers((prev) => ({ ...prev, q22_futureFeeling: val }))
                 }
@@ -1344,12 +1461,13 @@ export default function App() {
               </div>
 
               <VoiceTextarea
-                value={answers.q23_oneLastThing.notes}
+                id="q23-one-last-thing-notes"
+                value={answers.q23_oneLastThing?.notes ?? ""}
                 onChange={(val) =>
                   setAnswers((prev) => ({
                     ...prev,
                     q23_oneLastThing: {
-                      ...prev.q23_oneLastThing,
+                      images: prev.q23_oneLastThing?.images ?? [],
                       notes: val,
                     },
                   }))

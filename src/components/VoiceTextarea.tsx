@@ -3,9 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useId } from "react";
 import { Mic, X, Check, Globe } from "lucide-react";
-import { SPEECH_LANGUAGES, SpeechLanguageCode, ACCENT_COLOR } from "../constants.ts";
+import { SPEECH_LANGUAGES, SpeechLanguageCode } from "../constants.ts";
 import { useSpeechRecognition } from "../hooks/useSpeechRecognition.ts";
 
 interface VoiceTextareaProps {
@@ -31,6 +31,9 @@ export const VoiceTextarea: React.FC<VoiceTextareaProps> = ({
   onEnterPress,
   singleLine = false,
 }) => {
+  const generatedId = useId();
+  const inputId = id || generatedId;
+
   // Stored language selection
   const [language, setLanguage] = useState<SpeechLanguageCode>(() => {
     try {
@@ -67,22 +70,24 @@ export const VoiceTextarea: React.FC<VoiceTextareaProps> = ({
     friendlyError,
     startListening,
     stopSession,
+    updateBaseText,
   } = useSpeechRecognition({
     language,
     onCommit: (newText) => {
       onChange(newText);
-      // Place cursor at end after done
+      // Place cursor at end after commit
       setTimeout(() => {
         if (textareaRef.current) {
           textareaRef.current.focus();
-          textareaRef.current.selectionStart = textareaRef.current.value.length;
-          textareaRef.current.selectionEnd = textareaRef.current.value.length;
+          const len = textareaRef.current.value.length;
+          textareaRef.current.selectionStart = len;
+          textareaRef.current.selectionEnd = len;
         }
       }, 50);
     },
   });
 
-  // Auto-resize textarea to fit text
+  // Auto-resize textarea to fit content
   useEffect(() => {
     if (textareaRef.current && !singleLine) {
       textareaRef.current.style.height = "auto";
@@ -98,24 +103,35 @@ export const VoiceTextarea: React.FC<VoiceTextareaProps> = ({
     if (singleLine && e.key === "Enter") {
       e.preventDefault();
       onEnterPress?.();
-    } else if (!singleLine && e.key === "Enter" && !e.shiftKey && onEnterPress) {
-      // If user presses Enter without Shift in single-line intent
-      // We keep Shift+Enter for multiline newline, but can also let normal enter in multiline
     }
   };
 
-  const handleMicClick = () => {
+  const handleMicClick = (e: React.MouseEvent) => {
+    e.stopPropagation();
     if (!isListening) {
-      startListening(value);
+      startListening(value ?? "");
     }
   };
 
-  const handleCancel = () => {
+  const handleCancel = (e: React.MouseEvent) => {
+    e.stopPropagation();
     stopSession(false);
+    setTimeout(() => {
+      textareaRef.current?.focus();
+    }, 50);
   };
 
-  const handleDone = () => {
+  const handleDone = (e: React.MouseEvent) => {
+    e.stopPropagation();
     stopSession(true);
+    setTimeout(() => {
+      if (textareaRef.current) {
+        textareaRef.current.focus();
+        const len = textareaRef.current.value.length;
+        textareaRef.current.selectionStart = len;
+        textareaRef.current.selectionEnd = len;
+      }
+    }, 50);
   };
 
   const activeLangLabel =
@@ -125,16 +141,20 @@ export const VoiceTextarea: React.FC<VoiceTextareaProps> = ({
     <div className="w-full space-y-2">
       {label && (
         <label
-          htmlFor={id}
-          className="block text-base sm:text-lg font-medium text-[#1A1A1A]"
+          htmlFor={inputId}
+          className="block text-base sm:text-lg font-medium text-[#1A1A1A] cursor-pointer"
+          onClick={() => textareaRef.current?.focus()}
         >
           {label}
         </label>
       )}
 
-      {/* Main Textarea Container with listening state styling */}
+      {/* Main Textarea Container */}
       <div
-        className={`relative w-full rounded-2xl border transition-all duration-200 bg-white ${
+        onClick={() => {
+          textareaRef.current?.focus();
+        }}
+        className={`relative w-full rounded-2xl border transition-all duration-200 bg-white cursor-text ${
           isListening
             ? "border-[#B08D57] ring-4 ring-[#B08D57]/20 shadow-lg"
             : "border-[#E8E8E8] hover:border-[#1A1A1A]/40 focus-within:border-[#1A1A1A] focus-within:ring-2 focus-within:ring-[#1A1A1A]/10 shadow-xs"
@@ -142,13 +162,19 @@ export const VoiceTextarea: React.FC<VoiceTextareaProps> = ({
       >
         <textarea
           ref={textareaRef}
-          id={id}
+          id={inputId}
+          name={inputId}
           rows={singleLine ? 1 : rows}
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
+          value={value ?? ""}
+          onChange={(e) => {
+            const val = e.target.value;
+            onChange(val);
+            updateBaseText(val);
+          }}
           onKeyDown={handleKeyDown}
           placeholder={placeholder}
           aria-label={label || placeholder}
+          autoComplete="off"
           className="w-full px-5 py-4 text-[18px] leading-relaxed text-[#1A1A1A] placeholder:text-[#5F5F5F]/60 bg-transparent resize-none focus:outline-hidden rounded-2xl min-h-[58px]"
         />
 
@@ -166,7 +192,10 @@ export const VoiceTextarea: React.FC<VoiceTextareaProps> = ({
             <div className="relative shrink-0">
               <button
                 type="button"
-                onClick={() => setShowLangMenu(!showLangMenu)}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setShowLangMenu(!showLangMenu);
+                }}
                 className="flex items-center gap-1.5 px-2 sm:px-2.5 py-1.5 rounded-lg text-xs sm:text-sm text-[#5F5F5F] hover:text-[#1A1A1A] hover:bg-white border border-transparent hover:border-[#E8E8E8] transition-colors shrink-0"
                 aria-label="Select speech language"
                 aria-expanded={showLangMenu}
@@ -225,7 +254,7 @@ export const VoiceTextarea: React.FC<VoiceTextareaProps> = ({
                   <button
                     type="button"
                     onClick={handleCancel}
-                    className="w-9 h-9 sm:w-10 sm:h-10 rounded-full flex items-center justify-center bg-white border border-[#E8E8E8] text-[#5F5F5F] hover:text-[#1A1A1A] hover:bg-[#FAFAFA] active:scale-95 transition-all shadow-xs shrink-0"
+                    className="w-9 h-9 sm:w-10 sm:h-10 rounded-full flex items-center justify-center bg-white border border-[#E8E8E8] text-[#5F5F5F] hover:text-[#1A1A1A] hover:bg-[#FAFAFA] active:scale-95 transition-all shadow-xs shrink-0 cursor-pointer"
                     aria-label="Cancel speech dictation"
                     title="Cancel and revert"
                   >
@@ -235,7 +264,7 @@ export const VoiceTextarea: React.FC<VoiceTextareaProps> = ({
                   <button
                     type="button"
                     onClick={handleDone}
-                    className="w-9 h-9 sm:w-10 sm:h-10 rounded-full flex items-center justify-center bg-[#1A1A1A] text-white hover:bg-[#333333] active:scale-95 transition-all shadow-sm shrink-0"
+                    className="w-9 h-9 sm:w-10 sm:h-10 rounded-full flex items-center justify-center bg-[#1A1A1A] text-white hover:bg-[#333333] active:scale-95 transition-all shadow-sm shrink-0 cursor-pointer"
                     aria-label="Finish speech dictation"
                     title="Done speaking"
                   >
@@ -248,7 +277,7 @@ export const VoiceTextarea: React.FC<VoiceTextareaProps> = ({
               <button
                 type="button"
                 onClick={handleMicClick}
-                className="flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-white hover:bg-[#FAFAFA] active:bg-[#E8E8E8] border border-[#E8E8E8] text-sm font-medium text-[#1A1A1A] transition-all shadow-2xs hover:shadow-xs min-h-[38px]"
+                className="flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-white hover:bg-[#FAFAFA] active:bg-[#E8E8E8] border border-[#E8E8E8] text-sm font-medium text-[#1A1A1A] transition-all shadow-2xs hover:shadow-xs min-h-[38px] cursor-pointer"
                 aria-label="Tap to speak into this field"
                 title="Speak to dictate"
               >
@@ -273,7 +302,7 @@ export const VoiceTextarea: React.FC<VoiceTextareaProps> = ({
       {/* Unsupported browser fallback tip */}
       {isVoiceEnabled && !isSupported && (
         <div className="text-xs text-[#5F5F5F] px-1">
-          Tip: tap the microphone on your mobile keyboard to speak your answer.
+          Tip: tap the microphone on your mobile keyboard to speak your answer, or type your answer above.
         </div>
       )}
     </div>

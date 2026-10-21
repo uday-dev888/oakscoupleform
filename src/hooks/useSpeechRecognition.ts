@@ -4,76 +4,15 @@
  */
 
 import { useState, useEffect, useRef, useCallback } from "react";
-import { GoogleGenAI, LiveServerMessage } from "@google/genai";
 import { SpeechLanguageCode } from "../constants.ts";
 import { cleanSentenceText, deduplicateTranscript } from "../utils/textCleaner.ts";
 
-// Global tracker to ensure only one microphone is active at any time
+// Global tracker to ensure only one microphone is active across the entire application
 let activeSessionStopper: (() => void) | null = null;
 
 export interface UseSpeechRecognitionOptions {
   onCommit: (text: string) => void;
   language: SpeechLanguageCode;
-}
-
-// Inline fallback for the AudioWorklet processor in case file fetch fails
-const WORKLET_PROCESSOR_CODE = `
-class PcmProcessor extends AudioWorkletProcessor {
-  constructor() {
-    super();
-    this.targetSampleRate = 16000;
-    this.chunkSize = 1600; // 100ms at 16kHz
-    this.buffer = new Int16Array(this.chunkSize);
-    this.bufferIndex = 0;
-    this.sourceOffset = 0;
-  }
-
-  process(inputs) {
-    const input = inputs[0];
-    if (!input || !input[0] || input[0].length === 0) return true;
-    const channelData = input[0];
-    const inRate = sampleRate;
-    const outRate = this.targetSampleRate;
-    const ratio = inRate / outRate;
-
-    let inIndex = this.sourceOffset;
-    while (inIndex < channelData.length) {
-      const idx0 = Math.floor(inIndex);
-      const idx1 = Math.min(idx0 + 1, channelData.length - 1);
-      const frac = inIndex - idx0;
-      const s0 = channelData[idx0];
-      const s1 = channelData[idx1];
-      const sample = s0 + frac * (s1 - s0);
-
-      const clamped = Math.max(-1, Math.min(1, sample));
-      const int16 = clamped < 0 ? Math.round(clamped * 0x8000) : Math.round(clamped * 0x7FFF);
-
-      this.buffer[this.bufferIndex++] = int16;
-
-      if (this.bufferIndex >= this.chunkSize) {
-        const chunkToSend = new Int16Array(this.buffer);
-        this.port.postMessage(chunkToSend.buffer, [chunkToSend.buffer]);
-        this.bufferIndex = 0;
-      }
-
-      inIndex += ratio;
-    }
-
-    this.sourceOffset = inIndex - channelData.length;
-    return true;
-  }
-}
-registerProcessor("pcm-processor", PcmProcessor);
-`;
-
-function arrayBufferToBase64(buffer: ArrayBuffer): string {
-  const bytes = new Uint8Array(buffer);
-  let binary = "";
-  const len = bytes.byteLength;
-  for (let i = 0; i < len; i++) {
-    binary += String.fromCharCode(bytes[i]);
-  }
-  return btoa(binary);
 }
 
 export function useSpeechRecognition({
@@ -85,21 +24,30 @@ export function useSpeechRecognition({
   const [interimText, setInterimText] = useState<string>("");
   const [friendlyError, setFriendlyError] = useState<string | null>(null);
 
-  // References for live session management
-  const mediaStreamRef = useRef<MediaStream | null>(null);
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const workletNodeRef = useRef<AudioWorkletNode | null>(null);
-  const liveSessionRef = useRef<any>(null);
+  // Store callbacks and options in refs to prevent unnecessary re-runs
+  const onCommitRef = useRef(onCommit);
+  onCommitRef.current = onCommit;
 
-  const isExplicitlyStoppedRef = useRef<boolean>(true);
+  const languageRef = useRef(language);
+  languageRef.current = language;
+
+  const isListeningRef = useRef<boolean>(false);
+  const recognitionRef = useRef<any>(null);
+
+  // Text tracking refs
   const committedBaseRef = useRef<string>("");
   const currentDictationRef = useRef<string>("");
+  const lastProcessedIndexRef = useRef<number>(-1);
+  const restartTimerRef = useRef<any>(null);
 
   // Check support on mount
   useEffect(() => {
-    const hasMedia = typeof navigator !== "undefined" && !!navigator.mediaDevices?.getUserMedia;
-    const hasAudioCtx = typeof window !== "undefined" && (!!window.AudioContext || !!(window as any).webkitAudioContext);
-    if (!hasMedia || !hasAudioCtx) {
+    const hasSpeech =
+      typeof window !== "undefined" &&
+      (!!(window as any).SpeechRecognition ||
+        !!(window as any).webkitSpeechRecognition);
+
+    if (!hasSpeech) {
       setIsSupported(false);
     }
   }, []);
@@ -114,48 +62,44 @@ export function useSpeechRecognition({
     }
   }, []);
 
+  // Update base text when the user manually types into the textarea
+  const updateBaseText = useCallback((text: string) => {
+    committedBaseRef.current = text;
+  }, []);
+
+  // Stop session internally
   const stopSessionInternal = useCallback(
     (keepCaptured: boolean, statusNotice?: string) => {
-      isExplicitlyStoppedRef.current = true;
-
-      // 1. Disconnect and stop AudioWorklet & AudioContext
-      if (workletNodeRef.current) {
-        try {
-          workletNodeRef.current.port.onmessage = null;
-          workletNodeRef.current.disconnect();
-        } catch {
-          // ignore
+      if (!isListeningRef.current && !recognitionRef.current) {
+        if (statusNotice) {
+          setFriendlyError(statusNotice);
         }
-        workletNodeRef.current = null;
+        return;
       }
 
-      if (audioContextRef.current) {
-        try {
-          audioContextRef.current.close();
-        } catch {
-          // ignore
-        }
-        audioContextRef.current = null;
+      isListeningRef.current = false;
+      if (restartTimerRef.current) {
+        clearTimeout(restartTimerRef.current);
+        restartTimerRef.current = null;
       }
 
-      // 2. Stop single continuous MediaStream tracks
-      if (mediaStreamRef.current) {
+      // Stop speech recognition instance
+      if (recognitionRef.current) {
+        const rec = recognitionRef.current;
+        recognitionRef.current = null;
         try {
-          mediaStreamRef.current.getTracks().forEach((track) => track.stop());
+          rec.onstart = null;
+          rec.onresult = null;
+          rec.onerror = null;
+          rec.onend = null;
+          rec.stop();
         } catch {
-          // ignore
+          try {
+            rec.abort();
+          } catch {
+            // ignore
+          }
         }
-        mediaStreamRef.current = null;
-      }
-
-      // 3. Close Gemini Live session
-      if (liveSessionRef.current) {
-        try {
-          liveSessionRef.current.close();
-        } catch {
-          // ignore
-        }
-        liveSessionRef.current = null;
       }
 
       setIsListening(false);
@@ -173,16 +117,17 @@ export function useSpeechRecognition({
             : currentDictationRef.current.trim()
           : committedBaseRef.current;
         const cleaned = cleanSentenceText(combined);
-        onCommit(cleaned);
+        onCommitRef.current(cleaned);
       } else {
-        onCommit(committedBaseRef.current);
+        // Revert to original committed base text
+        onCommitRef.current(committedBaseRef.current);
       }
 
       if (activeSessionStopper === stopSessionInternal) {
         activeSessionStopper = null;
       }
     },
-    [onCommit, triggerHaptic]
+    [triggerHaptic]
   );
 
   const stopSession = useCallback(
@@ -192,11 +137,11 @@ export function useSpeechRecognition({
     [stopSessionInternal]
   );
 
-  // Tab visibility change (screen lock or background)
+  // Stop listening when tab is hidden (phone locked or switched app)
   useEffect(() => {
     const handleVisibilityChange = () => {
-      if (document.hidden && isListening) {
-        stopSession(true, "Tap the mic to continue speaking");
+      if (document.hidden && isListeningRef.current) {
+        stopSessionInternal(true, "Tap the mic to continue speaking");
       }
     };
 
@@ -204,23 +149,24 @@ export function useSpeechRecognition({
     return () => {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [isListening, stopSession]);
+  }, [stopSessionInternal]);
 
-  // Cleanup on unmount
+  // Clean up on component unmount
   useEffect(() => {
     return () => {
-      stopSessionInternal(true);
+      if (restartTimerRef.current) {
+        clearTimeout(restartTimerRef.current);
+      }
+      if (isListeningRef.current) {
+        stopSessionInternal(true);
+      }
     };
   }, [stopSessionInternal]);
 
+  // Start listening session
   const startListening = useCallback(
-    async (initialValue: string) => {
-      // 1. Immediately blur any active input/textarea to dismiss Android keyboard
-      if (typeof document !== "undefined" && document.activeElement instanceof HTMLElement) {
-        document.activeElement.blur();
-      }
-
-      // Stop any other active mic session in the app
+    (initialValue: string) => {
+      // 1. Stop any other microphone active in the app
       if (activeSessionStopper && activeSessionStopper !== stopSessionInternal) {
         activeSessionStopper();
       }
@@ -230,167 +176,129 @@ export function useSpeechRecognition({
       setInterimText("");
       committedBaseRef.current = initialValue || "";
       currentDictationRef.current = "";
-      isExplicitlyStoppedRef.current = false;
+      lastProcessedIndexRef.current = -1;
+
+      const SpeechClass =
+        (typeof window !== "undefined" &&
+          ((window as any).SpeechRecognition ||
+            (window as any).webkitSpeechRecognition)) ||
+        null;
+
+      if (!SpeechClass) {
+        setIsListening(false);
+        isListeningRef.current = false;
+        setFriendlyError(
+          "Voice dictation is unavailable in this browser. Please type your answer."
+        );
+        return;
+      }
+
+      // Mark listening immediately so the wave animation and action buttons appear instantly
+      isListeningRef.current = true;
+      setIsListening(true);
       triggerHaptic(40);
 
       try {
-        // 2. Request mic stream ONCE with recommended constraints
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            channelCount: 1,
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true,
-          },
-        });
+        const recognition = new SpeechClass();
+        recognition.continuous = true;
+        recognition.interimResults = true;
+        recognition.lang = languageRef.current || "en-IN";
+        recognition.maxAlternatives = 1;
 
-        // If stopped while prompting permission
-        if (isExplicitlyStoppedRef.current) {
-          stream.getTracks().forEach((t) => t.stop());
-          return;
-        }
-
-        mediaStreamRef.current = stream;
-
-        // 3. Fetch ephemeral token from serverless endpoint /api/live-token
-        let ephemeralToken: string | null = null;
-        try {
-          const res = await fetch("/api/live-token");
-          if (!res.ok) {
-            const errJson = await res.json().catch(() => ({}));
-            throw new Error(errJson.error || `HTTP ${res.status}`);
-          }
-          const json = await res.json();
-          ephemeralToken = json.token;
-        } catch (tokenErr: any) {
-          console.error("Token fetch failed:", tokenErr);
-          throw new Error("Unable to connect to live transcription service.");
-        }
-
-        if (!ephemeralToken) {
-          throw new Error("No live token received.");
-        }
-
-        // 4. Initialize Web Audio Context & AudioWorklet
-        const AudioCtxClass = window.AudioContext || (window as any).webkitAudioContext;
-        const audioCtx = new AudioCtxClass();
-        audioContextRef.current = audioCtx;
-
-        // Ensure audio context is running (needed on mobile after user gesture)
-        if (audioCtx.state === "suspended") {
-          await audioCtx.resume();
-        }
-
-        try {
-          await audioCtx.audioWorklet.addModule("/pcm-processor.js");
-        } catch (loadErr) {
-          // Fallback to inline blob URL if needed
-          const blob = new Blob([WORKLET_PROCESSOR_CODE], { type: "application/javascript" });
-          const blobUrl = URL.createObjectURL(blob);
-          await audioCtx.audioWorklet.addModule(blobUrl);
-          URL.revokeObjectURL(blobUrl);
-        }
-
-        const source = audioCtx.createMediaStreamSource(stream);
-        const workletNode = new AudioWorkletNode(audioCtx, "pcm-processor");
-        workletNodeRef.current = workletNode;
-
-        source.connect(workletNode);
-
-        // 5. Connect to Gemini Live API with ephemeral token
-        const clientAi = new GoogleGenAI({
-          apiKey: ephemeralToken,
-          httpOptions: { apiVersion: "v1alpha" },
-        });
-
-        const langPrompt = language
-          ? `The speaker is speaking in language code ${language}. `
-          : "";
-
-        const session = await clientAi.live.connect({
-          model: "gemini-3.5-transcribe-live",
-          config: {
-            inputAudioTranscription: {},
-            systemInstruction: `You are a silent, verbatim transcriber. Never reply or speak. ${langPrompt}Transcribe exactly what the speaker says, in the language they speak.`,
-          },
-          callbacks: {
-            onmessage: (message: LiveServerMessage) => {
-              const sc = message.serverContent;
-              if (!sc) return;
-
-              // Interim in-progress transcription
-              if (sc.interimInputTranscription?.text) {
-                setInterimText(sc.interimInputTranscription.text);
-              }
-
-              // Finalized input transcription segment
-              if (sc.inputTranscription?.text) {
-                const chunk = sc.inputTranscription.text;
-                currentDictationRef.current = deduplicateTranscript(
-                  currentDictationRef.current,
-                  chunk
-                );
-                const combined = committedBaseRef.current
-                  ? `${committedBaseRef.current.trim()} ${currentDictationRef.current.trim()}`
-                  : currentDictationRef.current.trim();
-                onCommit(cleanSentenceText(combined));
-                setInterimText("");
-              }
-            },
-            onerror: (err: any) => {
-              console.error("Live session error:", err);
-              if (!isExplicitlyStoppedRef.current) {
-                setFriendlyError("Live connection dropped. Tap mic to resume.");
-              }
-            },
-            onclose: () => {
-              if (!isExplicitlyStoppedRef.current) {
-                setIsListening(false);
-              }
-            },
-          },
-        });
-
-        liveSessionRef.current = session;
-        setIsListening(true);
-        setFriendlyError(null);
-
-        // 6. Stream ~100ms 16kHz mono 16-bit PCM chunks in real time
-        workletNode.port.onmessage = (event: MessageEvent<ArrayBuffer>) => {
-          if (isExplicitlyStoppedRef.current || !liveSessionRef.current) return;
-          try {
-            const base64Audio = arrayBufferToBase64(event.data);
-            liveSessionRef.current.sendRealtimeInput({
-              audio: {
-                data: base64Audio,
-                mimeType: "audio/pcm;rate=16000",
-              },
-            });
-          } catch (sendErr) {
-            console.error("Error sending realtime audio chunk:", sendErr);
+        recognition.onstart = () => {
+          if (isListeningRef.current) {
+            setIsListening(true);
+            setFriendlyError(null);
           }
         };
-      } catch (err: any) {
-        console.error("Failed to start voice listening:", err);
-        stopSessionInternal(true);
 
-        const errorMsg = err?.message || "";
-        if (
-          err?.name === "NotAllowedError" ||
-          err?.name === "PermissionDeniedError" ||
-          errorMsg.includes("denied")
-        ) {
-          setFriendlyError(
-            "We can't hear you yet. Please allow microphone access in your browser, or type instead."
-          );
-        } else {
-          setFriendlyError(
-            "Microphone or live connection unavailable. Tap to retry, or type your answer."
-          );
-        }
+        recognition.onresult = (event: any) => {
+          if (!isListeningRef.current) return;
+
+          let sessionFinalTranscript = "";
+          let currentInterim = "";
+
+          for (let i = 0; i < event.results.length; i++) {
+            const res = event.results[i];
+            const transcript = res[0]?.transcript || "";
+            if (res.isFinal) {
+              if (i > lastProcessedIndexRef.current) {
+                lastProcessedIndexRef.current = i;
+                sessionFinalTranscript = deduplicateTranscript(
+                  sessionFinalTranscript,
+                  transcript
+                );
+              }
+            } else {
+              currentInterim += transcript;
+            }
+          }
+
+          if (sessionFinalTranscript) {
+            currentDictationRef.current = deduplicateTranscript(
+              currentDictationRef.current,
+              sessionFinalTranscript
+            );
+            const combinedSoFar = committedBaseRef.current
+              ? `${committedBaseRef.current.trim()} ${currentDictationRef.current.trim()}`
+              : currentDictationRef.current.trim();
+            onCommitRef.current(cleanSentenceText(combinedSoFar));
+          }
+
+          setInterimText(currentInterim.trim());
+        };
+
+        recognition.onerror = (event: any) => {
+          const error = event.error;
+          if (error === "no-speech" || error === "aborted") {
+            // Non-fatal, keep listening or allow speech to resume
+            return;
+          }
+
+          if (error === "not-allowed" || error === "service-not-allowed") {
+            stopSessionInternal(true);
+            setFriendlyError(
+              "Microphone access blocked. Please allow microphone in browser settings, or type your answer."
+            );
+            return;
+          }
+
+          // Any other error: log and gently stop
+          console.warn("Speech recognition notice:", error);
+        };
+
+        recognition.onend = () => {
+          // If the user hasn't explicitly stopped listening, restart to ensure continuous dictation
+          if (isListeningRef.current && recognitionRef.current === recognition) {
+            try {
+              recognition.start();
+            } catch {
+              // Retry shortly if the browser needs a moment to reset
+              if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
+              restartTimerRef.current = setTimeout(() => {
+                if (isListeningRef.current && recognitionRef.current === recognition) {
+                  try {
+                    recognition.start();
+                  } catch {
+                    // Browser stopped speech service
+                  }
+                }
+              }, 250);
+            }
+          }
+        };
+
+        recognitionRef.current = recognition;
+        recognition.start();
+      } catch (err: any) {
+        console.warn("Could not start speech recognition:", err);
+        stopSessionInternal(true);
+        setFriendlyError(
+          "Microphone unavailable. Please allow microphone permissions, or type your answer."
+        );
       }
     },
-    [language, onCommit, stopSessionInternal, triggerHaptic]
+    [stopSessionInternal, triggerHaptic]
   );
 
   return {
@@ -400,5 +308,6 @@ export function useSpeechRecognition({
     friendlyError,
     startListening,
     stopSession,
+    updateBaseText,
   };
 }
